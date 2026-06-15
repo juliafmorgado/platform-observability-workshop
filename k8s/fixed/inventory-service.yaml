@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: meridian
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+    spec:
+      containers:
+        - name: inventory-service
+          image: meridian/inventory-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: otel-platform-config
+          env:
+            - name: PORT
+              value: "3001"
+            - name: OTEL_SERVICE_NAME
+              value: "inventory-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+  namespace: meridian
+spec:
+  selector:
+    app: inventory-service
+  ports:
+    - port: 3001
+      targetPort: 3001

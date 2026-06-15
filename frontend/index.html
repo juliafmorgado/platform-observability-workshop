@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meridian — Order System</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1a1d2e;
+      border-bottom: 1px solid #2d3148;
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    header h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    header span.badge {
+      font-size: 0.7rem;
+      background: #4f46e5;
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 2rem;
+      align-items: start;
+    }
+
+    .card {
+      background: #1a1d2e;
+      border: 1px solid #2d3148;
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+
+    .card h2 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin-bottom: 1.25rem;
+    }
+
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #94a3b8;
+      margin-bottom: 0.35rem;
+    }
+
+    select, input[type="number"] {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 0.55rem 0.75rem;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    select:focus, input[type="number"]:focus {
+      border-color: #4f46e5;
+    }
+
+    select option { background: #1a1d2e; }
+
+    button[type="submit"] {
+      width: 100%;
+      margin-top: 0.5rem;
+      padding: 0.65rem;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+    }
+
+    button[type="submit"]:hover { background: #4338ca; }
+    button[type="submit"]:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .status-bar {
+      margin-top: 1rem;
+      font-size: 0.8rem;
+      min-height: 1.2em;
+      color: #64748b;
+    }
+
+    .order-list { display: flex; flex-direction: column; gap: 0.6rem; }
+
+    .order-item {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      display: grid;
+      grid-template-columns: auto 1fr auto auto;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.85rem;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .dot.confirmed { background: #22c55e; }
+    .dot.error     { background: #ef4444; }
+    .dot.slow      { background: #f59e0b; }
+    .dot.pending   { background: #64748b; }
+    .dot.rejected  { background: #f97316; }
+
+    .order-item .item-name { font-weight: 600; color: #e2e8f0; }
+    .order-item .qty { color: #64748b; font-size: 0.78rem; }
+
+    .order-item .status-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+
+    .status-label.confirmed { background: #14532d; color: #4ade80; }
+    .status-label.error     { background: #450a0a; color: #f87171; }
+    .status-label.slow      { background: #451a03; color: #fbbf24; }
+    .status-label.pending   { background: #1e293b; color: #94a3b8; }
+    .status-label.rejected  { background: #431407; color: #fb923c; }
+
+    .order-item .latency { color: #64748b; font-size: 0.78rem; min-width: 50px; text-align: right; }
+
+    .empty-state {
+      text-align: center;
+      color: #334155;
+      padding: 3rem 0;
+      font-size: 0.85rem;
+    }
+
+    .counter {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-bottom: 0.75rem;
+      display: flex;
+      gap: 1rem;
+    }
+
+    .counter span { display: flex; align-items: center; gap: 4px; }
+    .counter .dot { width: 6px; height: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Meridian</h1>
+    <span class="badge">Order System</span>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>Place Order</h2>
+      <form id="orderForm">
+        <div class="form-group">
+          <label for="item">Item</label>
+          <select id="item" name="item">
+            <option value="widget">widget</option>
+            <option value="gadget">gadget</option>
+            <option value="slow-item">slow-item ⚠️ slow</option>
+            <option value="broken-item">broken-item ❌ errors</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="quantity">Quantity</label>
+          <input type="number" id="quantity" name="quantity" value="1" min="1" max="100" />
+        </div>
+        <button type="submit" id="submitBtn">Place Order</button>
+        <div class="status-bar" id="statusBar"></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Order History</h2>
+      <div class="counter" id="counter" style="display:none">
+        <span><span class="dot confirmed"></span><span id="cConfirmed">0</span> ok</span>
+        <span><span class="dot error"></span><span id="cError">0</span> errors</span>
+        <span><span class="dot slow"></span><span id="cSlow">0</span> slow</span>
+      </div>
+      <div class="order-list" id="orderList">
+        <div class="empty-state">No orders yet — place one to get started.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const ORDER_API = (window.ORDER_SERVICE_URL || '') + '/orders';
+    const SLOW_THRESHOLD_MS = 1000;
+
+    const form = document.getElementById('orderForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const statusBar = document.getElementById('statusBar');
+    const orderList = document.getElementById('orderList');
+    const counter = document.getElementById('counter');
+
+    const counts = { confirmed: 0, error: 0, slow: 0 };
+
+    function updateCounter() {
+      document.getElementById('cConfirmed').textContent = counts.confirmed;
+      document.getElementById('cError').textContent = counts.error;
+      document.getElementById('cSlow').textContent = counts.slow;
+      counter.style.display = 'flex';
+    }
+
+    function classifyOrder(order) {
+      if (order.status === 'error') return 'error';
+      if (order.status === 'rejected') return 'rejected';
+      if (order.latencyMs >= SLOW_THRESHOLD_MS) return 'slow';
+      return order.status;
+    }
+
+    function formatLatency(ms) {
+      if (!ms) return '';
+      if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+      return `${ms}ms`;
+    }
+
+    function prependOrder(order) {
+      if (orderList.querySelector('.empty-state')) {
+        orderList.innerHTML = '';
+      }
+
+      const cls = classifyOrder(order);
+
+      if (cls === 'confirmed') counts.confirmed++;
+      else if (cls === 'error') counts.error++;
+      else if (cls === 'slow') { counts.confirmed++; counts.slow++; }
+
+      updateCounter();
+
+      const el = document.createElement('div');
+      el.className = 'order-item';
+      el.innerHTML = `
+        <span class="dot ${cls}"></span>
+        <span class="item-name">${order.item}</span>
+        <span class="qty">×${order.quantity}</span>
+        <span class="status-label ${cls}">${cls === 'slow' ? 'slow' : order.status}</span>
+        <span class="latency">${formatLatency(order.latencyMs)}</span>
+      `;
+      orderList.insertBefore(el, orderList.firstChild);
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      statusBar.textContent = 'Placing order…';
+
+      const item = document.getElementById('item').value;
+      const quantity = parseInt(document.getElementById('quantity').value, 10);
+
+      const t0 = Date.now();
+      try {
+        const res = await fetch(ORDER_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item, quantity }),
+        });
+        const order = await res.json();
+        if (!order.latencyMs) order.latencyMs = Date.now() - t0;
+        prependOrder(order);
+        statusBar.textContent = `Order ${order.id} — ${order.status}`;
+      } catch (err) {
+        prependOrder({ id: 'local', item, quantity, status: 'error', reason: err.message, latencyMs: Date.now() - t0 });
+        statusBar.textContent = `Failed to reach order-service: ${err.message}`;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

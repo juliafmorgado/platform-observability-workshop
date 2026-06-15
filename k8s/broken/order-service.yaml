@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: meridian
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      containers:
+        - name: order-service
+          image: meridian/order-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: otel-platform-config
+          env:
+            - name: PORT
+              value: "3000"
+            - name: INVENTORY_SERVICE_URL
+              value: "http://inventory-service:3001"
+            - name: OTEL_SERVICE_NAME
+              value: "order-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: meridian
+spec:
+  selector:
+    app: order-service
+  ports:
+    - port: 3000
+      targetPort: 3000

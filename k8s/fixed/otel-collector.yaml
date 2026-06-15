@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: meridian
+data:
+  config.yaml: |
+    extensions:
+      file_storage:
+        directory: /var/lib/otelcol/file_storage
+        timeout: 10s
+        compaction:
+          on_start: true
+          on_rebound: true
+          rebound_needed_threshold_mib: 5
+          rebound_trigger_threshold_mib: 3
+          directory: /var/lib/otelcol/file_storage
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+        spike_limit_mib: 64
+
+    exporters:
+      otlp:
+        endpoint: ${DASH0_OTLP_ENDPOINT}
+        headers:
+          Authorization: "Bearer ${DASH0_TOKEN}"
+        tls:
+          insecure: false
+        # FIX 3: persistent queue + retry so data survives Collector restarts and backend blips
+        sending_queue:
+          enabled: true
+          num_consumers: 10
+          queue_size: 10000
+          storage: file_storage
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+    service:
+      extensions: [file_storage]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [otlp]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [otlp]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [otlp]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: meridian
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.104.0
+          args: ["--config=/etc/otel/config.yaml"]
+          ports:
+            - containerPort: 4317
+            - containerPort: 4318
+          env:
+            - name: DASH0_OTLP_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: dash0-credentials
+                  key: otlp-endpoint
+            - name: DASH0_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dash0-credentials
+                  key: token
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+            - name: queue-storage
+              mountPath: /var/lib/otelcol/file_storage
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+        - name: queue-storage
+          persistentVolumeClaim:
+            claimName: otel-collector-queue
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: otel-collector-queue
+  namespace: meridian
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: meridian
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: grpc
+      port: 4317
+      targetPort: 4317
+    - name: http
+      port: 4318
+      targetPort: 4318
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dash0-credentials
+  namespace: meridian
+type: Opaque
+stringData:
+  otlp-endpoint: "REPLACE_WITH_DASH0_OTLP_ENDPOINT"
+  token: "REPLACE_WITH_DASH0_TOKEN"

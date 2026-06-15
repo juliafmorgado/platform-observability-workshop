@@ -1,0 +1,15 @@
+{
+  "name": "inventory-service",
+  "version": "1.0.0",
+  "description": "Meridian inventory service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "@opentelemetry/auto-instrumentations-node": "^0.50.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.54.0",
+    "@opentelemetry/sdk-node": "^0.54.0"
+  }
+}
