@@ -5,10 +5,6 @@ metadata:
   namespace: meridian
 data:
   config.yaml: |
-    extensions:
-      file_storage:
-        directory: /var/lib/otelcol/file_storage
-
     receivers:
       otlp:
         protocols:
@@ -30,20 +26,8 @@ data:
           Authorization: "Bearer ${DASH0_TOKEN}"
         tls:
           insecure: false
-        # FIX 3: persistent queue + retry so data survives Collector restarts and backend blips
-        sending_queue:
-          enabled: true
-          num_consumers: 10
-          queue_size: 10000
-          storage: file_storage
-        retry_on_failure:
-          enabled: true
-          initial_interval: 5s
-          max_interval: 30s
-          max_elapsed_time: 300s
 
     service:
-      extensions: [file_storage]
       pipelines:
         traces:
           receivers: [otlp]
@@ -94,27 +78,10 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/otel
-            - name: queue-storage
-              mountPath: /var/lib/otelcol/file_storage
       volumes:
         - name: config
           configMap:
             name: otel-collector-config
-        - name: queue-storage
-          persistentVolumeClaim:
-            claimName: otel-collector-queue
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: otel-collector-queue
-  namespace: meridian
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

@@ -5,5 +5,4 @@ metadata:
   namespace: meridian
 data:
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
-  OTEL_RESOURCE_ATTRIBUTES: "service.version=1.0.0,deployment.environment=production"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
