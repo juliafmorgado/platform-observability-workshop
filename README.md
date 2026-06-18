@@ -1,24 +1,32 @@
 # Making Observability a First-Class Platform Concern
 
-**PlatformCon Workshop**
-
 The CTO is getting customer complaints about slow and failing orders. You open your observability backend and there is nothing useful even though the services are running.
 
-Three things are misconfigured in the platform layer and all three fail silently. Find them, fix them, and then use the working telemetry to diagnose what is actually wrong with the app.
+Three things are misconfigured in the platform layer and all three fail silently. Find them, and then use the working telemetry to diagnose what is actually wrong with the app.
 
 ---
 
 ## Architecture
 
-```
-[Frontend] -> [order-service :3000] -> [inventory-service :3001]
-                                    -> [shipping-service :3002]
+Meridian is a simple e-commerce app with three Node.js services:
+
+```mermaid
+graph LR
+    Actor([Actor]) --> F[frontend<br/>:8080]
+    Actor --> O[order-service<br/>:3000]
+    F --> O
+    O -->|HTTP| I[inventory-service<br/>:3001]
+    O -->|HTTP| S[shipping-service<br/>:3002]
+
+    style S stroke-dasharray: 5 5
 ```
 
-- **order-service** takes orders and calls inventory to check stock
-- **inventory-service** checks stock; some items behave badly by design
-- **shipping-service** has no instrumentation yet (that's Act 3)
-- **Frontend** is a simple order form at `http://localhost:8080`
+| Service | Port | Notes |
+|---|---|---|
+| frontend | 8080 | Static HTML order form |
+| order-service | 3000 | Entry point, calls downstream services |
+| inventory-service | 3001 | Check stocks. Has `/slow-item` and `/broken-item` test endpoints |
+| shipping-service | 3002 | Has no instrumentation yet (that's Act 3) |
 
 All Node.js services use `@opentelemetry/auto-instrumentations-node`. The only OTel line in any service file:
 
