@@ -240,10 +240,26 @@ echo "${COLLECTOR_CONFIG}" | grep -q "retry_on_failure" \
 - Run `./scripts/deploy-broken.sh` at least 30 min before start
 - Run `./scripts/generate-traffic.sh` (without `--with-issues`) for 15+ min so there's baseline data in Dash0
 - Open Dash0 — nothing meaningful should be showing, or services should be unnamed/missing. Screenshot this as your opening slide backup
-- Have VS Code open with `services/order-service/index.js`, font size 20+
+- **Install the operator and apply the OperatorConfiguration now — not live during the demo.** The operator's DaemonSet collector needs a few minutes to connect to Dash0 after the OperatorConfiguration is applied. Doing this beforehand means the collector is already connected when you do the live demo, and shipping-service spans appear within 30–60 seconds of the pod restart instead of after a multi-minute cold start:
+  ```bash
+  helm repo add dash0-operator https://dash0hq.github.io/dash0-operator
+  helm repo update
+  helm install dash0-operator dash0-operator/dash0-operator \
+    --namespace dash0-system \
+    --create-namespace
+  set -a && source .env && set +a
+  envsubst < k8s/operator/dash0-operator-configuration.yaml | kubectl apply -f -
+  ```
+  Wait 2–3 minutes, then verify the collector is running without errors:
+  ```bash
+  kubectl get pods -n dash0-system
+  kubectl logs -n dash0-system -l app.kubernetes.io/component=opentelemetry-collector --tail=10
+  ```
+  No export errors in the logs = ready. The namespace label and `Dash0Monitoring` resource are applied live during Act 3 — that's the demo.
+- Have VS Code open with `services/order-service/server.js`, font size 20+
 - Have `k8s/broken/otel-platform-config.yaml` open in a second tab
 - Have `k8s/broken/otel-collector.yaml` open in a third tab
-- Pre-type the helm operator install command in a notes file — copy-paste only, never type live
+- All helm/kubectl commands for Act 3 pre-typed in a notes file — copy-paste only, never type live
 - Test that slow and broken traffic actually flows:
   ```bash
   curl -s -X POST localhost:3000/orders -H "Content-Type: application/json" -d '{"item":"slow-item","quantity":1}'
@@ -504,7 +520,9 @@ The OTel Collector has two receivers: gRPC on port 4317, HTTP/protobuf on port 4
 
 The broken config had `OTEL_EXPORTER_OTLP_PROTOCOL: 'grpc'` pointing at port 4318. The SDK connected successfully — hostname resolves, TCP handshake works, the port is actually open and listening. But port 4318 is the HTTP receiver. When the gRPC client connects and starts speaking gRPC, the HTTP receiver rejects it. Every batch of spans failed. No crash. No DNS error. Service stayed up. Collector stayed up. Spans just never arrived.
 
-This is the class of failure that's worse than a hostname typo. A wrong hostname fails fast — you see DNS errors immediately. A port mismatch like this fails silently at the protocol layer, and the system looks healthy while your observability is dead. Could run for days.
+Notice the error in the service logs says `ECONNREFUSED`, not `ENOTFOUND`. That distinction matters. `ENOTFOUND` means the hostname didn't resolve — you typed the service name wrong. `ECONNREFUSED` means the hostname resolved, something was listening, but it rejected the connection at the port level. The hostname was right. The port was wrong. 4317 is gRPC. 4318 is HTTP/protobuf. One digit difference, completely silent in Dash0.
+
+This is the class of failure that's worse than a hostname typo. A wrong hostname fails fast — you see `ENOTFOUND` immediately. A port mismatch fails silently at the protocol layer, and the system looks healthy while your observability is dead. Could run for days.
 
 Fix: `OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4317'`. One digit. Both services unblocked.
 
@@ -854,7 +872,7 @@ The operator is the wiki page that actually runs."
 "Now tell the operator where to send data — this is the backend configuration:"
 
 ```bash
-source .env
+set -a && source .env && set +a
 envsubst < k8s/operator/dash0-operator-configuration.yaml | kubectl apply -f -
 ```
 
@@ -891,19 +909,63 @@ Let's see what it injected."
 kubectl describe pod -n meridian -l app=shipping-service
 ```
 
-[scroll through the output — point at three things]
+[scroll through the output — you may see two pods if the old one hasn't terminated yet. Point at the new one.]
 
-"Three things to notice.
+**What you'll actually see in the output:**
 
-First — the labels. `dash0.com/instrumented=true`, `dash0.com/instrumented-by=controller`. The operator stamped these on the pod when the webhook fired. You can use these to audit which workloads are instrumented across a cluster.
+The output will show two pods side by side if the old one is still terminating. This is actually useful — it makes the contrast visible.
 
-Second — the init container. `dash0-instrumentation` ran before the main container started, installed the OTel SDK into a shared volume at `/__otel_auto_instrumentation`, and then exited. The main container inherited that volume. The original image is completely unchanged.
+**First pod — before the operator restarted it:**
+```
+Environment:
+  PORT: 3002
+```
+That's it. One env var. No OTel anything. The service was running blind.
 
-Third — the env block. Look at `LD_PRELOAD` pointing to `libotelinject.so`. That's a dynamic library hook — it runs at process startup and wires up the OTel instrumentation before the application code runs. No require line. No Dockerfile edit. No code change of any kind.
+**Second pod — after the operator injected:**
 
-And `OTEL_EXPORTER_OTLP_ENDPOINT` is pointing to `http://$(DASH0_NODE_IP):40318`. That's not our otel-collector service — that's the operator's own node-local DaemonSet collector running on each node at port 40318. The operator is fully self-contained. It deployed its own telemetry pipeline. shipping-service doesn't reference otel-platform-config at all — look at the deployment YAML, it has one env var: PORT.
+Three things to point at explicitly:
 
-The service name is derived from Kubernetes metadata at runtime — the pod name, namespace, and labels feed into the injector config. The developer didn't set it. The platform didn't set it. The operator figured it out from what was already there."
+1. **The labels:**
+```
+dash0.com/instrumented=true
+dash0.com/instrumented-by=controller
+dash0.com/instrumentation-image=ghcr.io_dash0hq_instrumentation_0.144.0
+```
+The operator stamped these automatically when the webhook fired. You can use these to audit which pods are instrumented across a fleet and at what version. Useful for debugging and compliance.
+
+2. **The init container:**
+```
+Init Containers:
+  dash0-instrumentation:
+    Image: ghcr.io/dash0hq/instrumentation:0.144.0
+    State: Terminated — Reason: Completed — Exit Code: 0
+```
+This ran before the main container started. It installed the auto-instrumentation library into `/__otel_auto_instrumentation`, then exited cleanly with code 0. The main container inherited what it left behind. The developer's image is completely unchanged — same SHA256 as before the restart.
+
+3. **The injected env vars:**
+```
+OTEL_EXPORTER_OTLP_ENDPOINT: http://$(DASH0_NODE_IP):40318
+OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+LD_PRELOAD: /__otel_auto_instrumentation/injector/libotelinject.so
+OTEL_INJECTOR_K8S_NAMESPACE_NAME: meridian
+OTEL_INJECTOR_K8S_POD_NAME: shipping-service-...
+```
+
+A few things worth saying explicitly:
+
+- `OTEL_SERVICE_NAME` is not set. The operator derives the service name from the pod name and deployment metadata via the injector config. That's how shipping-service appears correctly named in Dash0 without anyone setting it.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` points to `http://$(DASH0_NODE_IP):40318` — not our `otel-collector` service, but the operator's own DaemonSet Collector running on the node. The operator is self-contained. It brought its own pipeline.
+- `LD_PRELOAD` is how Node.js instrumentation gets injected at the process level — the shared library patches the runtime before any app code loads. Same mechanism as the Java agent, same as Python's `opentelemetry-instrument` wrapper, but done at the platform layer so the developer never touches it.
+- `OTEL_LOGS_EXPORTER: none` — the operator disables log export by default. Traces only unless you opt in.
+
+---
+
+"Look at these two pods. Same image — identical SHA256. Same deployment. The first one has one environment variable. The second one has twelve. The operator added eleven of them, ran an init container that installed the instrumentation library, and stamped labels so you know exactly what was injected and at which version. The developer changed nothing. The image changed nothing. The platform did all of it."
+
+[pause — then point at LD_PRELOAD]
+
+"This is the mechanism. The operator injects a shared library that gets loaded before the Node.js process starts. It patches the runtime from the outside. Same idea as the Java agent, same as Python's opentelemetry-instrument wrapper — but done at the platform level, so the developer never has to think about it."
 
 [switch to Dash0 — shipping-service should be appearing within a minute]
 
@@ -1051,6 +1113,48 @@ Repo is in the chat — `github.com/dash0hq/dash0-examples`, platform-observabil
 Find me on X and LinkedIn at `@juliafmorgado`. I genuinely love hearing what people build from workshops — DM me, show me what you deployed, tell me what broke and what you fixed.
 
 Thank you."
+
+---
+
+### BONUS: Remove the last hardcoded value
+
+**Who this is for:** Anyone who finishes Act 1 early, or fast finishers during the hands-on blocks. Also good to walk through during a longer session as an extension of the Act 3 operator discussion.
+
+**What they do:**
+
+Open `k8s/broken/order-service.yaml` (or inventory-service). Find this env block:
+
+```yaml
+- name: OTEL_SERVICE_NAME
+  value: "order-service"
+```
+
+Replace it with:
+
+```yaml
+- name: OTEL_SERVICE_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: "metadata.labels['app']"
+```
+
+Apply and restart:
+
+```bash
+kubectl apply -f k8s/broken/order-service.yaml
+kubectl apply -f k8s/broken/inventory-service.yaml
+kubectl rollout restart deployment -n meridian
+```
+
+**Why it matters — what to say:**
+
+Right now `OTEL_SERVICE_NAME: "order-service"` is a hardcoded string in the deployment YAML. That means every time a new service joins the platform, someone has to remember to set it. And "remember to do this" is how you end up with services named `my-service` or `undefined` in production — someone copy-pasted the YAML and changed everything except this line.
+
+The Kubernetes Downward API lets a pod read its own metadata at runtime. Every deployment already has `app: order-service` as a label — it's used for pod selection, rollouts, service routing. With the `fieldRef` pattern, `OTEL_SERVICE_NAME` reads from that label instead of a hardcoded string. The label is already there. You're not adding anything new — you're just wiring service identity to something that already exists.
+
+The practical result: adding a new service to the platform requires zero OTel config. You set the `app` label (which you had to do anyway), and the platform derives the service name automatically.
+
+This is exactly what the Dash0 operator does for uninstrumented workloads — it reads the pod's Kubernetes metadata to derive the service name without the developer setting anything. The bonus exercise shows the same principle applied manually, which makes the operator's behavior easier to understand.
 
 ---
 

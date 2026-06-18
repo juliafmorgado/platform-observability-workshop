@@ -51,7 +51,7 @@ When the script finishes you will have the frontend at `http://localhost:8080`, 
 
 ## Act 1: Fix the platform
 
-Three bugs. Two files:
+You have three bugs to fix on two files:
 
 - `k8s/broken/otel-platform-config.yaml` contains Bug 1 and Bug 2
 - `k8s/broken/otel-collector.yaml` contains Bug 3
@@ -68,7 +68,7 @@ kubectl describe configmap otel-platform-config -n meridian
 kubectl logs deployment/order-service -n meridian --tail=20
 ```
 
-Find all three bugs first, then apply everything at once:
+Find all three bugs first, fix them, then apply everything at once:
 
 ```bash
 kubectl apply -f k8s/broken/otel-platform-config.yaml
@@ -83,13 +83,14 @@ kubectl rollout restart deployment -n meridian
 <details>
 <summary>Hint 1: nothing is reaching Dash0</summary>
 
-The hostname resolves and the port is open, so there is no DNS or connection error. Check the service pod logs:
+Check the service pod logs:
 
 ```bash
 kubectl logs deployment/order-service -n meridian --tail=20
+# look for ECONNREFUSED — that tells you the hostname resolved but the port or protocol is wrong
 ```
 
-You will see a gRPC export error — the SDK connected successfully but the server rejected the request. Check the port in `OTEL_EXPORTER_OTLP_ENDPOINT` in `k8s/broken/otel-platform-config.yaml` and compare it to what the Collector actually listens on:
+`ECONNREFUSED` means the hostname was right but nothing answered on that port. `ENOTFOUND` would mean the hostname itself was wrong. Check the port in `OTEL_EXPORTER_OTLP_ENDPOINT` in `k8s/broken/otel-platform-config.yaml` and compare it to what the Collector actually listens on:
 
 ```bash
 kubectl get svc otel-collector -n meridian -o yaml
@@ -100,9 +101,9 @@ The OTel Collector listens for gRPC on `:4317` and HTTP/protobuf on `:4318`. The
 </details>
 
 <details>
-<summary>Hint 2: spans arrive but have no environment or version</summary>
+<summary>Hint 2: spans will arrive with no environment or version</summary>
 
-Filter spans in Dash0 by `deployment.environment`. Nothing comes back. Look at `k8s/broken/otel-platform-config.yaml`. What key is missing?
+Run `kubectl describe configmap otel-platform-config -n meridian` and look at every key that's there. A complete observability config needs an endpoint, a protocol, and resource attributes. Which of those three is missing from this ConfigMap?
 
 </details>
 
@@ -153,9 +154,9 @@ With observability working, generate traffic that includes the problematic items
 
 In Dash0, open the trace explorer. Three things to find:
 
-1. **The slow trace.** Switch to the Outlier chart. Sort the table by duration. Click into one of the ~2s traces and open the waterfall. Which specific span is taking the two seconds — and which service owns it? Look at the HTTP status code on that span. Is it an error?
+1. **The slow trace.** Switch to the Outlier chart. Sort the table by duration. Click into one of the ~2s traces and open the waterfall. Which specific span is taking the two seconds and which service owns it? Look at the HTTP status code on that span. Is it an error?
 
-2. **The error trace.** Find a trace with a failed span. Where does the error originate — order-service or inventory-service? Does it appear in both services in the same trace, or as two disconnected traces? What does that tell you about how the services are connected?
+2. **The error trace.** Find a trace with a failed span. Where does the error originate (order-service or inventory-service)? Does it appear in both services in the same trace, or as two disconnected traces? What does that tell you about how the services are connected?
 
 3. **The Triage view.** Switch to the Triage tab. Set the analysis method to "Compare spans with status ERROR versus OK & UNSET." Which `http.target` is most correlated with errors? Which status codes appear? This is how you'd find the broken endpoint in a system you'd never seen before.
 
@@ -177,7 +178,7 @@ helm install dash0-operator dash0-operator/dash0-operator \
 The helm install deploys the operator but doesn't configure the backend. Apply the operator configuration with your credentials (the file uses `${DASH0_OTLP_ENDPOINT}` and `${DASH0_TOKEN}` from your `.env`):
 
 ```bash
-source .env
+set -a && source .env && set +a
 envsubst < k8s/operator/dash0-operator-configuration.yaml | kubectl apply -f -
 ```
 
@@ -202,6 +203,12 @@ You'll see three things the operator injected:
 - `LD_PRELOAD` pointing to `libotelinject.so` — a dynamic library hook that wires up instrumentation at process startup, no code change required
 
 The `OTEL_EXPORTER_OTLP_ENDPOINT` points to `http://$(DASH0_NODE_IP):40318` — the operator's own node-local DaemonSet collector, not our `otel-collector` service. The operator is fully self-contained. shipping-service has no `envFrom`, no reference to `otel-platform-config`. The service name is derived from Kubernetes metadata at runtime. The developer configured nothing.
+
+Now generate some traffic and open Dash0. Within 30–60 seconds you'll see `shipping-service` appear in the trace explorer with spans flowing from a service that had zero OTel config when this act started.
+
+```bash
+./scripts/generate-traffic.sh --with-issues
+```
 
 ---
 
@@ -267,19 +274,29 @@ kind delete cluster --name meridian-workshop
 
 **Multi-environment (staging vs. production)**
 
-Separate namespaces, separate ConfigMaps. `otel-platform-config` in `meridian-staging` has `deployment.environment=staging`. With Kustomize: a base ConfigMap with shared defaults and a per-environment overlay that patches `OTEL_RESOURCE_ATTRIBUTES`. The developer-facing config is identical either way — services don't know or care which ConfigMap they inherit from.
+Run staging and production in separate namespaces. Each namespace gets its own `otel-platform-config` ConfigMap. The production one has `deployment.environment=production`, the staging one has `deployment.environment=staging`. That's the only difference.
+
+Services don't change at all. They use `envFrom: otel-platform-config` in both namespaces. They just inherit from whichever ConfigMap exists in their namespace. A service deployed to `meridian-staging` automatically gets staging attributes. The same service deployed to `meridian-production` gets production attributes. No per-service config, no environment variables in CI, no developer involvement.
+
+With Kustomize you can manage this without duplicating the whole file: a base `otel-platform-config` with shared defaults (endpoint, protocol, service version) and a per-environment overlay that patches only `OTEL_RESOURCE_ATTRIBUTES`. Change the base once and both environments inherit it on the next rollout.
 
 **Collector topology: DaemonSet vs. Deployment**
 
-For application telemetry, a single Collector Deployment is fine. If you also need host-level metrics (node CPU, disk I/O, kubelet stats), add a DaemonSet Collector alongside it — it runs one pod per node and has the node-level access a Deployment doesn't. Common pattern: DaemonSet for node metrics, Deployment as the aggregation and export layer.
+A Deployment runs a fixed number of Collector replicas anywhere in the cluster. A DaemonSet runs exactly one Collector pod per node.
+
+For application telemetry (traces, service metrics, application logs) a single Collector Deployment is fine. Services send spans to it over the network, it batches and exports to Dash0. That's what this workshop uses. If you also need host-level signals (node CPU and memory, disk I/O, kubelet stats, container runtime metrics) you need a DaemonSet. Those signals require access to the node's filesystem and kubelet API, which a Deployment pod doesn't have. The DaemonSet runs on every node so it can collect local host metrics without network hops.
+
+The common production pattern is both. A DaemonSet for node-level signals, and a Deployment as the aggregation and export layer that the DaemonSet forwards to. The Dash0 operator uses exactly this pattern. It deploys its own DaemonSet Collector on each node (port 40318), which is why `OTEL_EXPORTER_OTLP_ENDPOINT` in the injected pods points to the node IP rather than a cluster service.
+
+The aggregation Deployment is where platform policy lives. It's the `otel-collector` you built in Act 1, the one with `sending_queue`, `retry_on_failure`, and the persistent PVC. In production you'd extend it with multiple exporters to fan out to several backends simultaneously, a `transform` processor to scrub PII from logs before export, and a `tail_sampling` processor to keep 100% of error traces while sampling down healthy ones. All of that happens in one Collector config, applied to every service automatically, with no developer involvement.
 
 **Sampling**
 
-At scale, 100% trace sampling gets expensive. The right answer is tail-based sampling in the Collector: buffer complete traces, then decide whether to keep them based on whether they had errors, exceeded latency thresholds, or match some other policy. The `tail_sampling` processor handles this. The persistent queue from Bug 3 is a prerequisite — you need durable buffering for tail sampling to work correctly.
+At scale, 100% trace sampling gets expensive. The right answer is tail-based sampling in the Collector. So buffer complete traces, then decide whether to keep them based on whether they had errors, exceeded latency thresholds, or match some other policy. The `tail_sampling` processor handles this. The persistent queue from Bug 3 is a prerequisite. You need durable buffering for tail sampling to work correctly.
 
 **GitOps**
 
-The ConfigMap is a plain manifest. ArgoCD or Flux syncs it like anything else. The discipline: treat `otel-platform-config.yaml` as platform infrastructure with its own review process, not application config scattered across service repos. Platform config that gets treated like application config eventually drifts.
+The ConfigMap is a plain manifest. ArgoCD or Flux syncs it like anything else. Treat `otel-platform-config.yaml` as platform infrastructure with its own review process, not application config scattered across service repos. Platform config that gets treated like application config eventually drifts.
 
 ---
 

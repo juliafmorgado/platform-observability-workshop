@@ -27,6 +27,8 @@ spec:
               value: "3000"
             - name: INVENTORY_SERVICE_URL
               value: "http://inventory-service:3001"
+            - name: SHIPPING_SERVICE_URL
+              value: "http://shipping-service:3002"
             - name: OTEL_SERVICE_NAME
               value: "order-service"
 ---

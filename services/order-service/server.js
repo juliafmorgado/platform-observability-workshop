@@ -8,6 +8,7 @@ const app = express();
 app.use(express.json());
 
 const INVENTORY_URL = process.env.INVENTORY_SERVICE_URL || 'http://localhost:3001';
+const SHIPPING_URL  = process.env.SHIPPING_SERVICE_URL  || 'http://localhost:3002';
 
 const orders = [];
 
@@ -42,6 +43,7 @@ app.post('/orders', async (req, res) => {
       order.reason = `only ${available} in stock`;
     } else {
       order.status = 'confirmed';
+      await axios.post(`${SHIPPING_URL}/ship`, { orderId: order.id, item, quantity }).catch(() => {});
     }
 
     order.latencyMs = latency;

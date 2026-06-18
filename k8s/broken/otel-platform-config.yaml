@@ -4,8 +4,6 @@ metadata:
   name: otel-platform-config
   namespace: meridian
 data:
-  # BUG 1: gRPC protocol pointed at the HTTP port (:4318) — gRPC expects :4317
-  # the hostname resolves, the port is open, but the protocol is rejected silently
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
-  # BUG 2: OTEL_RESOURCE_ATTRIBUTES is absent — no service.version or deployment.environment on any span
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  OTEL_RESOURCE_ATTRIBUTES: "service.version=1.0.0,deployment.environment=production"
