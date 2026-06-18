@@ -8,13 +8,6 @@ data:
     extensions:
       file_storage:
         directory: /var/lib/otelcol/file_storage
-        timeout: 10s
-        compaction:
-          on_start: true
-          on_rebound: true
-          rebound_needed_threshold_mib: 5
-          rebound_trigger_threshold_mib: 3
-          directory: /var/lib/otelcol/file_storage
 
     receivers:
       otlp:
@@ -138,13 +131,3 @@ spec:
     - name: http
       port: 4318
       targetPort: 4318
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: dash0-credentials
-  namespace: meridian
-type: Opaque
-stringData:
-  otlp-endpoint: "REPLACE_WITH_DASH0_OTLP_ENDPOINT"
-  token: "REPLACE_WITH_DASH0_TOKEN"

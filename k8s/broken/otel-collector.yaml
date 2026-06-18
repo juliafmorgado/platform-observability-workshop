@@ -27,7 +27,7 @@ data:
         tls:
           insecure: false
         # BUG 3: no sending_queue with persistent storage, no retry_on_failure
-        # Data is lost whenever the Collector restarts or the backend is temporarily unavailable
+        # data is lost whenever the Collector restarts or the backend is temporarily unavailable
 
     service:
       pipelines:
@@ -100,13 +100,3 @@ spec:
     - name: http
       port: 4318
       targetPort: 4318
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: dash0-credentials
-  namespace: meridian
-type: Opaque
-stringData:
-  otlp-endpoint: "REPLACE_WITH_DASH0_OTLP_ENDPOINT"
-  token: "REPLACE_WITH_DASH0_TOKEN"

@@ -37,11 +37,15 @@ Everything else, the endpoint, protocol, and resource attributes, comes from env
 ```bash
 cp .env.template .env
 # fill in DASH0_TOKEN and DASH0_OTLP_ENDPOINT
+```
+
+Then run these scripts (preflight checks everything is installed and your credentials work).
+```bash
 ./scripts/preflight.sh
 ./scripts/deploy-broken.sh
 ```
 
-When the script finishes: frontend at `http://localhost:8080`, order API at `http://localhost:3000`.
+When the script finishes you will have the frontend at `http://localhost:8080`, and order API at `http://localhost:3000`.
 
 ---
 
@@ -54,9 +58,14 @@ Three bugs. Two files:
 
 Both services inherit their OTLP config from `otel-platform-config` via `envFrom`. That means neither service has a hardcoded endpoint or resource attributes. One change in the ConfigMap propagates to both services on the next rollout restart. When all services are dark, start with the shared config, not the individual service YAMLs.
 
+Start your investigation here:
+
 ```bash
+# inspect the platform config — protocol, endpoint, missing keys
 kubectl describe configmap otel-platform-config -n meridian
-kubectl logs deployment/otel-collector -n meridian --tail=30
+
+# service logs — export errors show up here, not in the Collector
+kubectl logs deployment/order-service -n meridian --tail=20
 ```
 
 Find all three bugs first, then apply everything at once:
@@ -74,9 +83,19 @@ kubectl rollout restart deployment -n meridian
 <details>
 <summary>Hint 1: nothing is reaching Dash0</summary>
 
-Check the service pod logs and the Collector logs for export errors. The Collector hostname is reachable — the connection is being established. Look at both `OTEL_EXPORTER_OTLP_PROTOCOL` and the port in `OTEL_EXPORTER_OTLP_ENDPOINT` in `k8s/broken/otel-platform-config.yaml`.
+The hostname resolves and the port is open, so there is no DNS or connection error. Check the service pod logs:
 
-The OTel Collector has two listeners on two different ports: gRPC on `:4317`, HTTP/protobuf on `:4318`. They are not interchangeable. Protocol and port must match.
+```bash
+kubectl logs deployment/order-service -n meridian --tail=20
+```
+
+You will see a gRPC export error — the SDK connected successfully but the server rejected the request. Check the port in `OTEL_EXPORTER_OTLP_ENDPOINT` in `k8s/broken/otel-platform-config.yaml` and compare it to what the Collector actually listens on:
+
+```bash
+kubectl get svc otel-collector -n meridian -o yaml
+```
+
+The OTel Collector listens for gRPC on `:4317` and HTTP/protobuf on `:4318`. The protocol in `OTEL_EXPORTER_OTLP_PROTOCOL` and the port in `OTEL_EXPORTER_OTLP_ENDPOINT` must match.
 
 </details>
 
@@ -99,11 +118,11 @@ The fixed version uses `sending_queue` with `file_storage` and `retry_on_failure
 <details>
 <summary>All three fixes (spoilers)</summary>
 
-**Bug 1** `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` but the endpoint uses port `:4317`, which is the Collector's gRPC port. The SDK connects successfully but spans are rejected at the protocol layer with no clear error message. Fix:
+**Bug 1** `OTEL_EXPORTER_OTLP_ENDPOINT` uses port `:4318`, which is the Collector's HTTP/protobuf port. `OTEL_EXPORTER_OTLP_PROTOCOL` is set to `grpc`, which expects port `:4317`. The hostname resolves, the connection opens, but the request is rejected at the protocol layer. Fix:
 ```yaml
-OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 ```
-Alternatively: change the endpoint port to `:4318` and leave the protocol as `http/protobuf`. Both work; `grpc` is preferred within a cluster.
+Alternatively: change the protocol to `http/protobuf` and leave the port as `:4318`. Both work; `grpc` on `:4317` is preferred within a cluster.
 
 **Bug 2** `OTEL_RESOURCE_ATTRIBUTES` is missing entirely from `otel-platform-config`. Add:
 ```yaml
@@ -132,15 +151,13 @@ With observability working, generate traffic that includes the problematic items
 ./scripts/generate-traffic.sh --with-issues
 ```
 
-In Dash0, open the trace explorer. Two things to find:
+In Dash0, open the trace explorer. Three things to find:
 
-1. **The slow trace.** Sort by duration. Which span is taking 2 seconds? Which service owns it? You'd never know from the HTTP response alone.
-2. **The error trace.** Where does the error originate? Does it propagate to the calling service, or do you see two disconnected traces?
+1. **The slow trace.** Switch to the Outlier chart. Sort the table by duration. Click into one of the ~2s traces and open the waterfall. Which specific span is taking the two seconds — and which service owns it? Look at the HTTP status code on that span. Is it an error?
 
-Try Agent0:
-- *"Which service is causing slow orders?"*
-- *"Show me traces where inventory-service returned a 500"*
-- *"What's the P95 latency for the /stock endpoint over the last 5 minutes?"*
+2. **The error trace.** Find a trace with a failed span. Where does the error originate — order-service or inventory-service? Does it appear in both services in the same trace, or as two disconnected traces? What does that tell you about how the services are connected?
+
+3. **The Triage view.** Switch to the Triage tab. Set the analysis method to "Compare spans with status ERROR versus OK & UNSET." Which `http.target` is most correlated with errors? Which status codes appear? This is how you'd find the broken endpoint in a system you'd never seen before.
 
 ---
 
@@ -154,15 +171,21 @@ helm repo update
 
 helm install dash0-operator dash0-operator/dash0-operator \
   --namespace dash0-system \
-  --create-namespace \
-  --set operator.dash0Backend.endpoint="${DASH0_OTLP_ENDPOINT}" \
-  --set operator.dash0Backend.authorization.token="${DASH0_TOKEN}"
+  --create-namespace
 ```
 
-Label the namespace, then restart the service:
+The helm install deploys the operator but doesn't configure the backend. Apply the operator configuration with your credentials (the file uses `${DASH0_OTLP_ENDPOINT}` and `${DASH0_TOKEN}` from your `.env`):
+
+```bash
+source .env
+envsubst < k8s/operator/dash0-operator-configuration.yaml | kubectl apply -f -
+```
+
+Label the namespace, create the monitoring resource, then restart the service:
 
 ```bash
 kubectl label namespace meridian dash0.com/instrumentWorkloads=all
+kubectl apply -f k8s/operator/dash0-monitoring.yaml
 kubectl rollout restart deployment/shipping-service -n meridian
 ```
 
@@ -172,7 +195,13 @@ Inspect what the operator injected:
 kubectl describe pod -n meridian -l app=shipping-service
 ```
 
-You'll see `OTEL_SERVICE_NAME=shipping-service` from the operator (derived from the workload name). You won't see `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_RESOURCE_ATTRIBUTES` in the injected env, because those came from `otel-platform-config`, the ConfigMap you fixed in Act 1. The operator handled the identity. The platform handled the rest.
+You'll see three things the operator injected:
+
+- `dash0.com/instrumented=true` label on the pod
+- A `dash0-instrumentation` init container that installed the OTel SDK before the main container started
+- `LD_PRELOAD` pointing to `libotelinject.so` — a dynamic library hook that wires up instrumentation at process startup, no code change required
+
+The `OTEL_EXPORTER_OTLP_ENDPOINT` points to `http://$(DASH0_NODE_IP):40318` — the operator's own node-local DaemonSet collector, not our `otel-collector` service. The operator is fully self-contained. shipping-service has no `envFrom`, no reference to `otel-platform-config`. The service name is derived from Kubernetes metadata at runtime. The developer configured nothing.
 
 ---
 
@@ -266,7 +295,8 @@ The ConfigMap is a plain manifest. ArgoCD or Flux syncs it like anything else. T
 │   └── index.html
 ├── k8s/
 │   ├── broken/              # Starting state, three intentional bugs
-│   └── fixed/               # Correct state
+│   ├── fixed/               # Correct state
+│   └── operator/            # Dash0 operator resources for Act 3
 └── scripts/
     ├── preflight.sh
     ├── deploy-broken.sh

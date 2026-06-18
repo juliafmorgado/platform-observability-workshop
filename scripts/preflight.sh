@@ -51,6 +51,13 @@ else
   warn "curl not found — generate-traffic.sh won't work (install with: brew install curl)"
 fi
 
+# envsubst (needed for Act 3 operator setup)
+if command -v envsubst &>/dev/null; then
+  ok "envsubst available"
+else
+  fail "envsubst not found — needed for Act 3 operator setup (install with: brew install gettext && brew link --force gettext)"
+fi
+
 # .env file
 if [ -f "$(dirname "$0")/../.env" ]; then
   ok ".env file found"

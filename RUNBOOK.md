@@ -67,17 +67,20 @@ metadata:
   name: otel-platform-config
   namespace: meridian
 data:
-  # BUG 1: http/protobuf pointed at the gRPC port
-  OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  # BUG 1: gRPC protocol pointed at the HTTP port (:4318) — gRPC expects :4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
   # BUG 2: OTEL_RESOURCE_ATTRIBUTES is absent
 ```
 
-The OTel Collector has two receivers on two different ports: gRPC on `:4317`, HTTP/protobuf on `:4318`. They are not interchangeable. With `http/protobuf` pointing at `:4317`, the SDK connects successfully — hostname resolves, TCP handshake works — but every span is rejected at the protocol layer. No clear error. No crash. Spans just don't arrive.
+The OTel Collector has two receivers on two different ports: gRPC on `:4317`, HTTP/protobuf on `:4318`. They are not interchangeable. With `grpc` protocol pointing at `:4318`, the SDK connects successfully — hostname resolves, TCP handshake works, the port is open — but the HTTP receiver at `:4318` doesn't speak gRPC. Every span export fails at the protocol layer. No crash. No DNS error. Spans just don't arrive.
 
-This is deliberately harder than a hostname typo. A wrong hostname fails fast with a DNS error. A protocol mismatch fails quietly, and the service looks healthy while your observability is dead.
+This is deliberately harder than a wrong hostname. A wrong hostname fails fast with a DNS NXDOMAIN. A port mismatch like this fails quietly — the connection looks fine from both sides, but they're speaking different languages once the handshake is done.
 
-Fix: change `OTEL_EXPORTER_OTLP_PROTOCOL` to `grpc`, then:
+Fix: change the port in `OTEL_EXPORTER_OTLP_ENDPOINT` from `:4318` to `:4317`:
+```yaml
+OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+```
 ```bash
 kubectl apply -f k8s/broken/otel-platform-config.yaml
 kubectl rollout restart deployment -n meridian
@@ -403,7 +406,34 @@ A: CI/CD shouldn't be the source of truth for runtime observability config. If y
 
 If they've found Bug 1 already: "Good. Don't fix it yet — what else do you see in that ConfigMap? Look at all the keys. What should be there that isn't?"
 
-If they're stuck on Bug 1: "The Collector IS running and the hostname is correct — so the connection is being established. Run `kubectl logs deployment/otel-collector -n meridian --tail=30` and look for protocol errors. Then check both `OTEL_EXPORTER_OTLP_PROTOCOL` and the port in `OTEL_EXPORTER_OTLP_ENDPOINT`. The Collector listens for gRPC on :4317 and HTTP on :4318. Do those two values agree with each other?"
+If they're stuck on Bug 1: "The Collector looks healthy — the error is not there. Check the service logs: `kubectl logs deployment/order-service -n meridian --tail=20`. You'll see a gRPC export error. Then check what port the endpoint is using: `kubectl describe configmap otel-platform-config -n meridian`. Now compare it to what the Collector actually listens on: `kubectl get svc otel-collector -n meridian -o yaml`. The Collector listens for gRPC on :4317 and HTTP/protobuf on :4318. Which port is the ConfigMap using for a gRPC client?"
+
+**What the service logs actually show — and what each line means:**
+
+When someone runs `kubectl logs deployment/order-service -n meridian --tail=20`, they'll see roughly this:
+
+```
+OTEL_LOGS_EXPORTER is empty. Using default otlp exporter.
+OTEL_TRACES_EXPORTER is empty. Using default otlp exporter.
+OpenTelemetry automatic instrumentation started successfully
+order-service listening on :3000
+Accessing resource attributes before async attributes settled
+Accessing resource attributes before async attributes settled
+Accessing resource attributes before async attributes settled
+{"grpcCode":"UNAVAILABLE","message":"Export failure — failed to connect to otel-collector:4318"}
+```
+
+Here's how to narrate each part:
+
+**The good lines** — `OpenTelemetry automatic instrumentation started successfully` and `order-service listening on :3000`. SDK loaded fine, auto-instrumentation is active, service is healthy. The developer did their job. These are completely normal.
+
+**The suspicious line** — `Accessing resource attributes before async attributes settled` appears three times. This is Bug 2 introducing itself: `OTEL_RESOURCE_ATTRIBUTES` isn't set, so the SDK tries to read resource attributes before they're ready. Not fatal, won't crash anything, but it's a hint. If attendees ask: "That's Bug 2 showing up — something's missing from the platform config."
+
+**The line that reveals Bug 1:** A gRPC export error — `UNAVAILABLE` or `UNIMPLEMENTED`. The SDK opened a TCP connection to port `:4318` successfully — hostname resolved, TCP handshake worked, the port is actually open. But `:4318` is the Collector's HTTP/protobuf receiver. The gRPC client connects and starts speaking HTTP/2 with `Content-Type: application/grpc`, but the HTTP receiver doesn't understand it and rejects the request.
+
+The key teaching point: this is not "connection refused" and not a DNS error. The connection worked. The hostname resolved. The port answered. It's a protocol mismatch once the connection is open — they shook hands and then started speaking different languages. That's why it's subtle and the service keeps running. One digit off in the endpoint port. Both services dark.
+
+How to say it to the room: "The service is healthy. The Collector is running. The hostname is correct. So what's wrong? The port. The Collector has two listeners — gRPC on 4317, HTTP on 4318. The config is sending gRPC traffic to port 4318. The connection opens, both sides think they're talking, and then the protocol fails. One digit. That's it. Fix the port, do a rollout restart, both services come back."
 
 If they've found Bug 1 and 2: "Nice — now the Collector. Open `kubectl get configmap otel-collector-config -n meridian -o yaml`. Look at the `otlp` exporter block. What happens to spans that are in-flight when the Collector pod restarts? What does the config do about that?"
 
@@ -428,7 +458,7 @@ On Bug 2 — if someone asks why resource attributes matter:
 
 **What to watch for:**
 
-- Bug 1 is trickier than it looks — the Collector hostname is correct, so DNS resolves and the connection establishes. People typically find it via Collector logs showing protocol rejection errors, or by noticing the port/protocol mismatch. It should take 5-8 minutes with the logs hint
+- Bug 1 is trickier than it looks — the hostname resolves, the port is open, and the connection establishes. People typically find it by noticing the port number doesn't match the protocol, or by seeing the gRPC export error in service logs. It should take 5-8 minutes with the logs hint
 - Bug 2 takes longer because people look in service YAMLs first instead of the ConfigMap. Let them discover this on their own — the "oh, it's not per-service, it's in the shared ConfigMap" moment is the whole lesson
 - Bug 3 is the hardest. Most people haven't written Collector configs from scratch. That's fine — use the debrief to teach it
 
@@ -438,13 +468,21 @@ On Bug 2 — if someone asks why resource attributes matter:
 
 **What's on screen:** YOUR fixed Dash0 — both services visible, correct names, `deployment.environment=production`, `service.version=1.0.0` showing in span attributes. Have this pre-loaded on your machine.
 
+**What the fixed UI looks like:** The trace explorer shows a span table with both `order-service` and `inventory-service`. The latency chart at the top has a dotted line at ~2s — that's the `slow-item` requests sitting as outliers. You'll see red ERROR dots in the timeline. In the span list: `POST /orders` (order-service, ROOT), `GET /stock/:item` (order-service, CLIENT), `GET /stock/:item` (inventory-service, SERVER) — the full distributed call chain. `GET /stock/broken-item` appears as an error span. The p99 will be around 2s.
+
 ---
 
 "Ok. Timer's up. Let's look at what fixed looks like."
 
-[show fixed Dash0]
+[show fixed Dash0 — point at the latency chart first, then the span table]
 
-"Both services visible. `order-service`. `inventory-service`. Actual names. Span attributes show `deployment.environment=production`, `service.version=1.0.0`. Collector running with a persistent queue. Everything routing correctly.
+"Two services. Both visible. Look at the latency chart — that dotted line at two seconds is our slow-item requests. They're not random noise, they're consistent. Every single `slow-item` order takes exactly two seconds.
+
+Look at the span table. `POST /orders` from order-service — that's the entry point, marked ROOT. Below it, `GET /stock/:item` from order-service as a CLIENT span calling inventory-service, and `GET /stock/:item` from inventory-service as the SERVER span receiving it. One trace, two services, the full call chain visible.
+
+And the errors — `GET /stock/broken-item` is right there. You can see it failed. You can see where it failed.
+
+This is what the platform was supposed to be showing you the whole time.
 
 Before I show you the fixes — quick question. How many apply commands did you run? How many rollout restarts?"
 
@@ -464,11 +502,11 @@ Let me show you what changed."
 
 The OTel Collector has two receivers: gRPC on port 4317, HTTP/protobuf on port 4318. They are not the same port, they are not interchangeable, and the Collector will silently reject spans that arrive on the wrong one.
 
-The broken config had `OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf'` pointing at port 4317. The SDK connected successfully. TCP handshake worked. Hostname resolved. But every batch of spans was rejected at the protocol layer with no useful error message. The service stayed up. The Collector stayed up. Spans just didn't arrive.
+The broken config had `OTEL_EXPORTER_OTLP_PROTOCOL: 'grpc'` pointing at port 4318. The SDK connected successfully — hostname resolves, TCP handshake works, the port is actually open and listening. But port 4318 is the HTTP receiver. When the gRPC client connects and starts speaking gRPC, the HTTP receiver rejects it. Every batch of spans failed. No crash. No DNS error. Service stayed up. Collector stayed up. Spans just never arrived.
 
-This is the class of failure that's worse than a hostname typo. A wrong hostname fails fast — you see DNS errors immediately. A protocol mismatch fails silently at the application layer, and the system looks healthy while your observability is dead. Could run for days.
+This is the class of failure that's worse than a hostname typo. A wrong hostname fails fast — you see DNS errors immediately. A port mismatch like this fails silently at the protocol layer, and the system looks healthy while your observability is dead. Could run for days.
 
-Fix: `OTEL_EXPORTER_OTLP_PROTOCOL: 'grpc'`. One value. Both services unblocked.
+Fix: `OTEL_EXPORTER_OTLP_ENDPOINT: 'http://otel-collector:4317'`. One digit. Both services unblocked.
 
 Second — `OTEL_RESOURCE_ATTRIBUTES`. Completely absent in the broken version. This is where `service.version` and `deployment.environment` come from. Without it, spans arrive with no version, no environment. You can't filter by environment. You can't alert on version regressions. And here's the one people don't think about: resource attributes are stamped on every span. If you accidentally put a high-cardinality value here — pod name, user ID, request ID — you've just multiplied your ingestion cost by the cardinality of that field. Keep resource attributes low-cardinality. High-cardinality values belong on individual spans."
 
@@ -476,9 +514,69 @@ Second — `OTEL_RESOURCE_ATTRIBUTES`. Completely absent in the broken version. 
 
 "And the Collector. In the broken version, the `otlp` exporter had no `sending_queue` and no `retry_on_failure`. What that means in practice: the Collector receives a batch of spans, attempts to export them to Dash0, and if that export fails for any reason — network blip, Dash0 briefly unreachable, Collector pod restarting — those spans are gone. No retry. No buffer. Gone.
 
-The fix adds a `sending_queue` backed by a file storage extension. Spans get written to disk before export. If the export fails, the Collector retries with exponential backoff — five seconds, then thirty seconds, up to five minutes. The PVC we mount means this queue survives even if the Collector pod itself restarts.
+The fix has two parts. Walk through each piece — every line here does something specific.
 
-That's the difference between 'we lost four minutes of data during a node rotation' and 'we didn't.'"
+First, the Collector config:
+
+```yaml
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+```
+
+This defines a directory on disk where spans are written before export. Without this, the queue only lives in memory — it survives backend blips but disappears when the pod restarts.
+
+```yaml
+service:
+  extensions: [file_storage]
+```
+
+Extensions in the OTel Collector are declared separately from where they're used. This line actually loads the extension at startup. If you define `file_storage` but forget this line, the extension never initializes and the queue silently falls back to in-memory. No error, no warning.
+
+```yaml
+sending_queue:
+  enabled: true
+  storage: file_storage
+```
+
+Tells the exporter to write spans to disk before attempting export. The queue decouples receiving from exporting — the Collector keeps accepting spans from services even when the backend is slow or unreachable.
+
+```yaml
+retry_on_failure:
+  enabled: true
+  initial_interval: 5s
+  max_interval: 30s
+  max_elapsed_time: 300s
+```
+
+Without this, a failed export is dropped even with the queue configured. The queue holds the spans. Retry is what actually re-attempts sending them. Exponential backoff from 5 seconds, capped at 30 seconds per attempt, gives up entirely after 5 minutes total — at which point the queue fills up anyway.
+
+Second — and this is the subtle part — the Deployment mounts a PVC at that same directory:
+
+```yaml
+volumeMounts:
+  - name: queue-storage
+    mountPath: /var/lib/otelcol/file_storage
+volumes:
+  - name: queue-storage
+    persistentVolumeClaim:
+      claimName: otel-collector-queue
+```
+
+Without the PVC, `file_storage` writes to the container's ephemeral filesystem. The queue works, right up until the pod restarts, at which point the filesystem is gone and so is the queue. You can have every config line correct and still lose data if you forget the volume mount.
+
+That is the difference between losing four minutes of data during a node rotation and not losing it."
+
+**Note — Bug 3 is not visible in normal operation.** Unlike Bugs 1 and 2, you won't see anything wrong in Dash0 until the Collector restarts or the backend blips. If you want to make it tangible, do this live:
+
+```bash
+# while generate-traffic.sh is running — kill the Collector pod
+kubectl delete pod -n meridian -l app=otel-collector
+```
+
+With the broken config, spans generated during the ~30 second restart window are gone. You'll see a gap in the Dash0 timeline. With the fixed config and PVC, the queue flushes after the pod comes back and the gap doesn't appear.
+
+For a 90-minute session this demo is optional — the node rotation story lands without it. For a more technical audience or a longer session, killing the pod live is a strong moment.
 
 [pause]
 
@@ -629,15 +727,29 @@ A: All three signals — traces, metrics, and logs — if you're sending them. L
 
 "Ok your turn. Same data, your hands.
 
-Open the trace explorer. Sort by duration, descending. The slow traces will be at the top — they're about two seconds, which is very obvious against a background of twenty-millisecond normal requests.
+Three things I want you to find.
 
-Two things I want you to find:
+One — open the trace explorer. Switch the chart to Outlier view. Sort the table by duration. Click into one of the two-second traces and open the waterfall. Which specific span is taking the two seconds? Is the slowness in order-service or inventory-service? Look at the HTTP status code on that span.
 
-One — open a slow trace and look at the span waterfall. Which specific span is taking the two seconds? Is the slowness happening in order-service, or in inventory-service? Click into the span and look at the attributes. Is there anything on the span that tells you about the request that caused it?
+Two — find a failed trace. Where does the error originate? Does it appear in both services in the same waterfall, or as two disconnected traces?
 
-Two — find a failed trace. Look at where the error originates. Does it stay in the service where it originated, or does it propagate? Meaning — does order-service know that inventory-service failed, or do you see two disconnected traces?"
+Three — switch to the Triage tab. Set analysis to 'Compare spans with status ERROR versus OK and UNSET.' Which http.target is most correlated with errors? Which status codes? This is the view you'd use on a system you'd never seen before.
 
-[give people five minutes — walk around, watch over shoulders]
+Eight minutes. Go."
+
+[give people eight minutes — walk around, watch over shoulders]
+
+---
+
+**What the UI looks like at this point:**
+
+Two views are worth walking through explicitly.
+
+**Table view + Outlier chart** — the starting point. At the top of the span explorer, the outlier chart has a dotted line at 2.01s. All normal spans cluster near zero. Every slow-item request sits exactly on that ceiling — consistent, not random. In the table below, you'll see `GET /stock/slow-item` (order-service, CLIENT, 2,008ms) and `GET /stock/:item` (inventory-service, SERVER, 2,005ms) right next to each other. Those two rows together tell you the story before you even click anything: the client span is order-service making the outbound call; the server span is inventory-service handling it. Both take ~2 seconds. The other spans on the page are <1ms.
+
+**Waterfall view** — what you see after clicking into a slow trace. The root span is `POST /orders` from order-service, 2,011ms total. Almost all of it is one child span: `GET /stock/slow-item` at 2,008ms (order-service, CLIENT). Nested inside that is `GET /stock/:item` from inventory-service at 2,005ms (SERVER). Below that: four inventory-service middleware spans, all <1ms. The waterfall makes the call chain structural — you can see at a glance that order-service spends 2 seconds waiting for inventory-service, and inventory-service spends almost all of that inside the request handler. The right panel on the selected span shows `http.response.status_code: 200 OK`. That's the key detail: the request succeeded. The customer got a slow response, not an error. No alarm fired. There was nothing to indicate anything was wrong — except this trace.
+
+**Triage view** — what you see after switching to the Triage tab with "Compare spans with status ERROR versus OK & UNSET." The table shows attributes ranked by how strongly they correlate with error spans. `http.target: /stock/broken-item` will be near the top at ~46% — meaning that attribute appears in 46% more error spans than healthy ones. `http.response.status_code: 500` and `502` appear together. This view answers the question "what's different about the requests that fail?" without requiring you to click through individual traces. In a real incident on an unfamiliar system, this is where you'd start.
 
 ---
 
@@ -647,17 +759,33 @@ Two — find a failed trace. Look at where the error originates. Does it stay in
 
 [wait for someone to say `inventory-service /stock/slow-item`]
 
-"Exactly. And how did you know it was inventory-service and not order-service? Because the span waterfall shows you the call chain. order-service makes the call, inventory-service handles it, the two seconds happen inside inventory-service's span. Without distributed tracing you'd have no way to know that. You'd see 'order is slow' and start looking at order-service's code, which is completely fine."
+"Exactly. How did you know it was inventory-service and not order-service?
+
+Look at the waterfall — `POST /orders` is the entry point in order-service, 2,011ms total. Then `GET /stock/slow-item` — that's order-service making the outbound call, also ~2s. Nested inside it: `GET /stock/:item` in inventory-service, 2,005ms. That's the server-side span — inventory-service receiving and handling the call.
+
+The two seconds happen inside inventory-service's span. order-service is just waiting. Without distributed tracing you'd file a ticket saying 'orders are slow' and start looking at order-service code — which is completely innocent. The trace gives you the right service on the first click.
+
+And look at the status code on that inventory-service span: 200 OK. It returned successfully. The customer got their order — just after waiting two seconds. No error, no alert, nothing in the logs. The only signal is this latency data."
 
 "Now the error. Who found it? Where did the error show up?"
 
 [wait for someone to notice the error on the inventory-service span AND the corresponding error on the order-service span]
 
-"Both services. One trace. The error originated in inventory-service — `database connection lost` — but order-service received that error over HTTP and marked its own span as failed too. That's trace context propagation working correctly.
+"Both services. One trace. The error originated in inventory-service — but order-service received it over HTTP and marked its own span as failed too. That's trace context propagation working correctly.
 
 The W3C Trace Context spec defines a `traceparent` header. When order-service calls inventory-service, the auto-instrumentation injects that header with the current trace ID and span ID. inventory-service reads it, creates a child span with the same trace ID, and continues the same trace. So when inventory-service fails, its span is marked as error — and because they share a trace ID, you see both spans in the same waterfall.
 
-If that propagation wasn't working — if someone had disabled it, or if one service wasn't using OTel — you'd see two disconnected traces with no relationship. You'd know something was failing but you wouldn't know the call chain. That's actually a common debugging nightmare in mixed-instrumentation environments."
+If that propagation wasn't working — if someone had disabled it, or if one service wasn't using OTel — you'd see two disconnected traces with no relationship. You'd know something was failing but you wouldn't know the call chain. That's a common debugging nightmare in mixed-instrumentation environments."
+
+"Now — who used the Triage view? What did you find?"
+
+[wait — someone will say /stock/broken-item or the 500 status code]
+
+"Exactly. The Triage view doesn't require you to know what you're looking for in advance. You point it at your error spans and it tells you which attributes are statistically different from the healthy spans. `/stock/broken-item` near the top — that's the system telling you 'this endpoint is the problem' without you clicking through a hundred traces.
+
+Here's why that matters at 2am: you've just been paged. You've never touched this codebase. The waterfall is great once you know which trace to look at. The Triage view is how you figure out which trace to look at.
+
+These three views — Outlier chart, waterfall, Triage — are the investigation loop. Chart to find the anomaly. Waterfall to understand the call chain. Triage to find the correlated attributes. You now know how to use all three."
 
 **Questions you'll get here:**
 
@@ -708,12 +836,10 @@ helm repo update
 
 helm install dash0-operator dash0-operator/dash0-operator \
   --namespace dash0-system \
-  --create-namespace \
-  --set operator.dash0Backend.endpoint="${DASH0_OTLP_ENDPOINT}" \
-  --set operator.dash0Backend.authorization.token="${DASH0_TOKEN}"
+  --create-namespace
 ```
 
-"This deploys the operator itself into the `dash0-system` namespace. It's running but not doing anything yet — it only acts on namespaces you explicitly tell it to watch."
+"This deploys the operator itself into the `dash0-system` namespace. It's running but not doing anything yet — it has no backend configured and no namespaces to watch."
 
 [while helm installs — usually 30-60 seconds]
 
@@ -725,10 +851,18 @@ The operator is the wiki page that actually runs."
 
 [helm finishes]
 
-"Now label the namespace to tell the operator to watch it:"
+"Now tell the operator where to send data — this is the backend configuration:"
+
+```bash
+source .env
+envsubst < k8s/operator/dash0-operator-configuration.yaml | kubectl apply -f -
+```
+
+"And tell it to watch the meridian namespace:"
 
 ```bash
 kubectl label namespace meridian dash0.com/instrumentWorkloads=all
+kubectl apply -f k8s/operator/dash0-monitoring.yaml
 ```
 
 "From this point on, any pod that starts in the `meridian` namespace will be automatically instrumented. Let's prove it."
@@ -757,13 +891,19 @@ Let's see what it injected."
 kubectl describe pod -n meridian -l app=shipping-service
 ```
 
-[scroll to the environment variables section]
+[scroll through the output — point at three things]
 
-"Look at the env block. `OTEL_SERVICE_NAME=shipping-service`. The operator derived that from the deployment name — no configuration needed. 
+"Three things to notice.
 
-Now look at what's NOT here. No `OTEL_EXPORTER_OTLP_ENDPOINT`. No `OTEL_RESOURCE_ATTRIBUTES`. Because those came from `otel-platform-config` — the ConfigMap we fixed in Act 1. shipping-service references that ConfigMap via `envFrom` just like the other services, and it picks up the correct endpoint and resource attributes automatically.
+First — the labels. `dash0.com/instrumented=true`, `dash0.com/instrumented-by=controller`. The operator stamped these on the pod when the webhook fired. You can use these to audit which workloads are instrumented across a cluster.
 
-You fixed the platform in Act 1. A service that didn't exist yet at the time benefited from it."
+Second — the init container. `dash0-instrumentation` ran before the main container started, installed the OTel SDK into a shared volume at `/__otel_auto_instrumentation`, and then exited. The main container inherited that volume. The original image is completely unchanged.
+
+Third — the env block. Look at `LD_PRELOAD` pointing to `libotelinject.so`. That's a dynamic library hook — it runs at process startup and wires up the OTel instrumentation before the application code runs. No require line. No Dockerfile edit. No code change of any kind.
+
+And `OTEL_EXPORTER_OTLP_ENDPOINT` is pointing to `http://$(DASH0_NODE_IP):40318`. That's not our otel-collector service — that's the operator's own node-local DaemonSet collector running on each node at port 40318. The operator is fully self-contained. It deployed its own telemetry pipeline. shipping-service doesn't reference otel-platform-config at all — look at the deployment YAML, it has one env var: PORT.
+
+The service name is derived from Kubernetes metadata at runtime — the pod name, namespace, and labels feed into the injector config. The developer didn't set it. The platform didn't set it. The operator figured it out from what was already there."
 
 [switch to Dash0 — shipping-service should be appearing within a minute]
 
@@ -771,14 +911,14 @@ You fixed the platform in Act 1. A service that didn't exist yet at the time ben
 
 [let that land]
 
-"shipping-service. Never had a line of OTel code. Now fully visible in Dash0. The operator injected the service name. The platform config provided the rest.
+"shipping-service. Zero OTel code. Zero platform config. Now fully visible in Dash0.
 
 This is the end state of platform observability: you deploy a service, it's observable. Not eventually. Not after someone files a ticket. Immediately, automatically, by default."
 
 **Questions you'll get here:**
 
 **Q: Will the operator conflict with OTel configuration a developer already set?**
-A: No. The operator is additive — it won't overwrite an env var that already exists in the pod spec. If `OTEL_SERVICE_NAME` is already set, the operator leaves it alone. If it's missing, the operator injects it. Teams that have already configured everything correctly will see no change. Teams that haven't get it for free.
+A: The operator routes through its own DaemonSet collector (port 40318) and injects its own endpoint. If a service already has `OTEL_EXPORTER_OTLP_ENDPOINT` set — like order-service and inventory-service, which inherit it from `otel-platform-config` — that value takes precedence over `envFrom` but the operator's injected env vars sit at the container spec level. In practice: services using `otel-platform-config` go through your custom otel-collector; services with no OTel config that the operator instruments go through the operator's own pipeline. Both end up in Dash0. If you want all services through one pipeline, point the operator's export to your otel-collector instead of directly to Dash0.
 
 **Q: What happens if the operator is down when a new pod starts?**
 A: The operator uses a mutating admission webhook with `failurePolicy: Ignore` by default. If the webhook is unavailable, the pod starts without the injection — it just won't have OTel config. In production you'd run the operator with multiple replicas for availability. `failurePolicy: Fail` is also an option if you'd rather block unobserved deploys than allow them, but that's a strong policy choice.
@@ -1051,7 +1191,7 @@ Good catch — that's correct. In the fixed state we use a PVC, which actually s
 - [ ] VS Code open with `services/order-service/index.js`, font size 20+
 - [ ] `k8s/broken/otel-platform-config.yaml` open in second tab
 - [ ] `k8s/broken/otel-collector.yaml` open in third tab
-- [ ] All helm/kubectl commands pre-typed in a notes file — copy-paste, never type live
+- [ ] All helm/kubectl commands pre-typed in a notes file — copy-paste, never type live (includes helm install, Dash0OperatorConfiguration apply, Dash0Monitoring apply, kubectl label, rollout restart)
 - [ ] `./scripts/generate-traffic.sh --with-issues` ready to run with one keypress
 - [ ] Participant guide URL in a short link, ready to paste
 - [ ] Water bottle

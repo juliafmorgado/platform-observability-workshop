@@ -27,7 +27,7 @@ if [ "${CM_PROTOCOL}" = "grpc" ] && [ "${CM_ENDPOINT}" = "http://otel-collector:
 else
   fail "Protocol/port mismatch: OTEL_EXPORTER_OTLP_PROTOCOL='${CM_PROTOCOL}' OTEL_EXPORTER_OTLP_ENDPOINT='${CM_ENDPOINT}'"
   echo "     The Collector listens for gRPC on :4317 and HTTP/protobuf on :4318 — they are not interchangeable."
-  echo "     Fix: set OTEL_EXPORTER_OTLP_PROTOCOL=grpc in k8s/broken/otel-platform-config.yaml, then:"
+  echo "     Fix: set OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 in k8s/broken/otel-platform-config.yaml, then:"
   echo "       kubectl apply -f k8s/broken/otel-platform-config.yaml"
   echo "       kubectl rollout restart deployment -n meridian"
 fi
