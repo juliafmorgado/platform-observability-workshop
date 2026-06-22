@@ -50,10 +50,16 @@ app.post('/orders', async (req, res) => {
   } catch (err) {
     order.status = 'error';
     order.reason = err.response?.data?.error || err.message;
+    order.inventoryStatusCode = err.response?.status;
   }
 
   orders.push(order);
-  const statusCode = order.status === 'error' ? 502 : 200;
+  // 404 from inventory → item does not exist → 422 Unprocessable Entity
+  // other upstream errors → 502 Bad Gateway
+  const inventoryStatus = order.inventoryStatusCode;
+  const statusCode = order.status !== 'error' ? 200
+    : inventoryStatus === 404 ? 422
+    : 502;
   res.status(statusCode).json(order);
 });
 

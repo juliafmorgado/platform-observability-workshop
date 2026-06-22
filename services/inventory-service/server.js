@@ -19,9 +19,10 @@ app.get('/stock/:item', async (req, res) => {
     return res.json({ item, available: 50 });
   }
 
-  // Simulated failure
-  if (item === 'broken-item') {
-    return res.status(500).json({ error: 'database connection lost' });
+  // Unknown item — return 404 instead of 500
+  const knownItems = ['widget', 'gadget', 'slow-item'];
+  if (!knownItems.includes(item)) {
+    return res.status(404).json({ error: `item '${item}' not found` });
   }
 
   res.json({ item, available: 50 });
