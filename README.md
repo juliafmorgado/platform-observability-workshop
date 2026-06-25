@@ -63,8 +63,8 @@ When the script finishes you will have the frontend at `http://localhost:8080`, 
 
 You have three bugs to fix on two files:
 
-- `k8s/broken/otel-platform-config.yaml` contains Bug 1 and Bug 2
-- `k8s/broken/otel-collector.yaml` contains Bug 3
+- `k8s/broken/otel-platform-config.yaml` contains Issue 1 and Issue 2
+- `k8s/broken/otel-collector.yaml` contains Issue 3
 
 Both services inherit their OTLP config from `otel-platform-config` via `envFrom`. That means neither service has a hardcoded endpoint or resource attributes. One change in the ConfigMap propagates to both services on the next rollout restart. When all services are dark, start with the shared config, not the individual service YAMLs.
 
@@ -135,19 +135,19 @@ The fixed version uses `sending_queue` with `file_storage` and `retry_on_failure
 <details>
 <summary>All three fixes (spoilers)</summary>
 
-**Bug 1** `OTEL_EXPORTER_OTLP_ENDPOINT` uses port `:4318`, which is the Collector's HTTP/protobuf port. `OTEL_EXPORTER_OTLP_PROTOCOL` is set to `grpc`, which expects port `:4317`. The hostname resolves, the connection opens, but the request is rejected at the protocol layer. Fix:
+**Issue 1 — broken connection** `OTEL_EXPORTER_OTLP_ENDPOINT` uses port `:4318`, which is the Collector's HTTP/protobuf port. `OTEL_EXPORTER_OTLP_PROTOCOL` is set to `grpc`, which expects port `:4317`. The hostname resolves, the connection opens, but the request is rejected at the protocol layer. Fix:
 ```yaml
 OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 ```
 Alternatively: change the protocol to `http/protobuf` and leave the port as `:4318`. Both work; `grpc` on `:4317` is preferred within a cluster.
 
-**Bug 2** `OTEL_RESOURCE_ATTRIBUTES` is missing entirely from `otel-platform-config`. Add:
+**Issue 2 — missing configuration** `OTEL_RESOURCE_ATTRIBUTES` is missing entirely from `otel-platform-config`. Add:
 ```yaml
 OTEL_RESOURCE_ATTRIBUTES: "service.version=1.0.0,deployment.environment=production"
 ```
 Keep these values low-cardinality. Resource attributes are stamped on every span. High-cardinality values here (pod names, user IDs, request IDs) multiply ingestion cost and cause dimension explosion in metric backends. Those belong on individual spans, not on the resource.
 
-**Bug 3** The `otlp` exporter in `otel-collector` has no `sending_queue` and no `retry_on_failure`. Every pod restart or backend blip silently drops in-flight spans. See `k8s/fixed/otel-collector.yaml` for the complete fix.
+**Issue 3 — reliability gap** The `otlp` exporter in `otel-collector` has no `sending_queue` and no `retry_on_failure`. Every pod restart or backend blip silently drops in-flight spans. See `k8s/fixed/otel-collector.yaml` for the complete fix.
 
 Apply:
 ```bash
@@ -308,7 +308,7 @@ The aggregation Deployment is where platform policy lives. It's the `otel-collec
 
 **Sampling**
 
-At scale, 100% trace sampling gets expensive. The right answer is tail-based sampling in the Collector. So buffer complete traces, then decide whether to keep them based on whether they had errors, exceeded latency thresholds, or match some other policy. The `tail_sampling` processor handles this. The persistent queue from Bug 3 is a prerequisite. You need durable buffering for tail sampling to work correctly.
+At scale, 100% trace sampling gets expensive. The right answer is tail-based sampling in the Collector. So buffer complete traces, then decide whether to keep them based on whether they had errors, exceeded latency thresholds, or match some other policy. The `tail_sampling` processor handles this. The persistent queue from Issue 3 is a prerequisite. You need durable buffering for tail sampling to work correctly.
 
 **GitOps**
 

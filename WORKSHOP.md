@@ -35,11 +35,11 @@ kubectl logs deployment/order-service -n meridian --tail=20
 kubectl get configmap otel-collector-config -n meridian -o yaml
 ```
 
-**Bug 1:** look for `ECONNREFUSED` in the logs. What port is the endpoint using?
+**Issue 1 — broken connection:** look for `ECONNREFUSED` in the logs. What port is the endpoint using?
 
-**Bug 2:** look for `Accessing resource attributes before async attributes settled`. Which key is absent from the ConfigMap?
+**Issue 2 — missing configuration:** look for `Accessing resource attributes before async attributes settled`. Which key is absent from the ConfigMap?
 
-**Bug 3:** look at the `otlp` exporter block in the Collector config. What is missing?
+**Issue 3 — reliability gap:** look at the `otlp` exporter block in the Collector config. What is missing?
 
 ---
 
