@@ -19,11 +19,6 @@ app.get('/stock/:item', async (req, res) => {
     return res.json({ item, available: 50 });
   }
 
-  // Simulated failure
-  if (item === 'broken-item') {
-    return res.status(500).json({ error: 'database connection lost' });
-  }
-
   res.json({ item, available: 50 });
 });
 
