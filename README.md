@@ -4,7 +4,7 @@ The CTO is getting customer complaints about slow and failing orders. You open y
 
 Three things are misconfigured in the platform layer and all three fail silently. Find them, and then use the working telemetry to diagnose what is actually wrong with the app.
 
-Following along in a live session? See [WORKSHOP.md](./WORKSHOP.md) for the session-paced companion guide.
+Following along in a live session? See [WORKSHOP.md](./WORKSHOP.md) for the session-paced companion guide (find and fix the bugs yourself), or [WORKSHOP-2.md](./WORKSHOP-2.md) for a guided tour of the already-fixed platform.
 
 ---
 
